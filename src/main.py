@@ -36,6 +36,8 @@ from src.regime.intermarket import IntermarketFilter
 from src.news.filter import NewsFilter
 from src.strategy.mean_reversion import MeanReversionStrategy
 from src.strategy.trend_following import TrendFollowingStrategy
+from src.risk.manager import RiskManager, RiskVerdict
+from src.execution.smart_executor import SmartExecutor, ExecutionPlan
 logger = None
 
 
@@ -63,7 +65,8 @@ class TradingSystem:
         self.news_filter: NewsFilter = None
         self.strategy_mr: MeanReversionStrategy = None
         self.strategy_tf: TrendFollowingStrategy = None
-        self.risk_manager = None
+        self.risk_manager: RiskManager = None
+        self.executor: SmartExecutor = None
         self.strategy_mr = None
         self.strategy_tf = None
         self.executor = None
@@ -156,7 +159,15 @@ class TradingSystem:
         self.strategy_tf = TrendFollowingStrategy(config=self.config)
         self.logger.info("strategies_initialized")
         
-        # 11. Start heartbeat
+        # 11. Initialize Risk Manager
+        self.risk_manager = RiskManager(config=self.config)
+        self.logger.info("risk_manager_initialized")
+        
+        # 12. Initialize Smart Executor
+        self.executor = SmartExecutor(bridge=self.bridge, config=self.config)
+        self.logger.info("smart_executor_initialized")
+        
+        # 13. Start heartbeat
         await self.bridge.start_heartbeat()
         
         # 3. Record daily start
@@ -311,7 +322,27 @@ class TradingSystem:
                 self.peak_equity_time = datetime.now(timezone.utc)
     
     def _check_circuit_breaker(self) -> bool:
-        """Check hard/soft circuit breakers. Returns False if trading blocked."""
+        """Check hard/soft circuit breakers via RiskManager."""
+        if self.risk_manager:
+            account = self.bridge.get_account_info()
+            if account:
+                self.risk_manager.update_equity(
+                    equity=account.equity,
+                    balance=account.balance,
+                    margin=account.margin,
+                    margin_free=account.margin_free,
+                )
+            
+            if self.risk_manager.is_halted():
+                self.logger.critical("trading_halted_circuit_breaker")
+                return False
+            
+            return True
+        
+        # Fallback: manual check
+        return self._check_circuit_breaker_manual()
+    
+    def _check_circuit_breaker_manual(self) -> bool:
         account = self.bridge.get_account_info()
         if account is None:
             return False
@@ -503,11 +534,94 @@ class TradingSystem:
     
     async def _execute_signal(self, signal: dict):
         """
-        Execute a validated trading signal.
-        Placeholder — full implementation with smart executor in Phase 5-6.
+        Execute a validated trading signal with risk management.
+        
+        Pipeline: Signal → RiskManager.approve → SmartExecutor.execute
         """
-        self.logger.info("signal_execute", signal=signal)
-        self.daily_trade_count += 1
+        if not self.risk_manager or not self.executor:
+            self.logger.warning("executor_not_ready")
+            return
+        
+        try:
+            signal_data = signal.get("signal", {})
+            direction = signal_data.get("signal", "long")
+            entry_price = signal_data.get("entry_price", 0)
+            stop_loss = signal_data.get("stop_loss", 0)
+            take_profit = signal_data.get("take_profit_1", 0)
+            atr = signal_data.get("atr", 0)
+            regime = signal.get("strategy", "mean_reversion")
+            
+            if regime == "mean_reversion":
+                regime = "mean_reversion"
+            elif regime == "trend_following":
+                regime = "trend_following"
+            
+            # Get current spread
+            spread = self.bridge.get_current_spread(self.config.symbols.primary)
+            
+            # Run risk approval
+            verdict = self.risk_manager.approve_trade(
+                signal=signal_data,
+                regime=regime,
+                direction=direction,
+                entry_price=entry_price,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                atr=atr,
+                current_spread_pips=spread,
+            )
+            
+            if not verdict.approved:
+                self.logger.info(
+                    "trade_rejected",
+                    reasons=verdict.rejection_reasons,
+                    signal=signal_data.get("signal"),
+                )
+                self.audit.log_decision("trade_rejected", {
+                    "verdict": verdict.to_dict(),
+                    "signal": signal_data,
+                })
+                return
+            
+            # Build execution plan
+            plan = ExecutionPlan(
+                symbol=self.config.symbols.primary,
+                direction=direction,
+                total_volume=verdict.position_size.lots,
+                entry_price=entry_price,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                strategy=regime,
+                regime=regime,
+                comment="MR" if regime == "mean_reversion" else "TF",
+            )
+            
+            # Execute
+            report = await self.executor.execute(plan)
+            
+            # Log result
+            if report.success:
+                self.daily_trade_count += 1
+                self.audit.log_decision("trade_executed", {
+                    "execution_report": report.to_dict(),
+                    "risk_verdict": verdict.to_dict(),
+                })
+                self.logger.info(
+                    "trade_executed_success",
+                    direction=direction,
+                    lots=report.filled_volume,
+                    price=round(report.average_fill_price, 5),
+                    slippage_pips=round(report.entry_slippage_pips, 2),
+                )
+            else:
+                self.logger.warning(
+                    "trade_execution_failed",
+                    error=report.error_message,
+                    filled_pct=f"{(report.filled_volume/plan.total_volume)*100:.0f}%" if plan.total_volume > 0 else "0%",
+                )
+                
+        except Exception as e:
+            self.logger.error("signal_execution_error", error=str(e))
     
     async def _manage_positions(self):
         """Manage open positions: trailing stops, partial closes."""
@@ -537,6 +651,8 @@ class TradingSystem:
             "regime": self.regime_detector.get_status() if self.regime_detector else {},
             "intermarket": self.intermarket_filter.get_status() if self.intermarket_filter else {},
             "news": self.news_filter.get_status() if self.news_filter else {},
+            "risk": self.risk_manager.get_status() if self.risk_manager else {},
+            "executor": self.executor.get_stats() if self.executor else {},
             "anomaly": self.anomaly_detector.get_status() if self.anomaly_detector else {},
             "daily_trades": self.daily_trade_count,
             "daily_dd_pct": round(daily_dd, 2),

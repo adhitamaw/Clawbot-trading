@@ -1,0 +1,257 @@
+# =============================================================================
+# XAU/USD Institutional Quantitative Trading System - Configuration
+# All tunable parameters live here, validated via Pydantic at startup
+# =============================================================================
+
+# ── MT5 Connection ──────────────────────────────────────────────────────────
+mt5:
+  # Path to MT5 terminal executable (Windows: "C:/Program Files/MetaTrader 5/terminal64.exe")
+  # Leave empty/null to connect to already-running terminal
+  terminal_path: null
+
+  # Login credentials (loaded from .env, fallback here for demo/paper)
+  login: ${MT5_LOGIN}
+  password: ${MT5_PASSWORD}
+  server: ${MT5_SERVER}
+
+  # Connection retry
+  max_reconnect_attempts: 10
+  reconnect_backoff_base_ms: 1000       # exponential backoff starting at 1s
+  reconnect_backoff_max_ms: 30000       # cap at 30s
+
+  # Heartbeat
+  heartbeat_interval_seconds: 30
+
+# ── Symbols ──────────────────────────────────────────────────────────────────
+symbols:
+  primary: "XAUUSD"
+  intermarket:
+    dxy: "DXY"
+    us10y: "US10Y"
+  # Additional symbols needed in Market Watch
+  watch_list:
+    - "XAUUSD"
+    - "DXY"
+
+# ── Time Settings ────────────────────────────────────────────────────────────
+time:
+  timezone: "UTC"
+  broker_gmt_offset: 0                   # some brokers use GMT+2/+3, adjust here
+  skip_rollover_minutes: 20              # 23:50-00:10 pause for rollover
+
+# ── Session Definitions (UTC) ───────────────────────────────────────────────
+sessions:
+  asian:
+    start_utc: 0                         # 00:00 UTC
+    end_utc: 8                           # 08:00 UTC
+  london:
+    start_utc: 8
+    end_utc: 13
+  ny_overlap:
+    start_utc: 13
+    end_utc: 17
+  late_ny:
+    start_utc: 17
+    end_utc: 24
+
+# ── Regime Detection ─────────────────────────────────────────────────────────
+regime:
+  # Dynamic confirmation thresholds
+  atr_period: 20
+  atr_rolling_median_period: 50
+  atr_median_low_threshold: 1.15         # ATR(20) < median * 1.15 → low vol
+  atr_median_high_threshold: 1.25        # ATR(20) > median * 1.25 → high vol
+
+  adx_period: 14
+  adx_low_threshold: 22                  # ADX < 22 → ranging
+  adx_high_threshold: 25                 # ADX > 25 → trending
+
+  # Regime switch must confirm on closed bar (M5)
+  confirm_bars: 1
+
+# ── Intermarket Filter ──────────────────────────────────────────────────────
+intermarket:
+  correlation_period: 20                 # 20-period rolling Pearson
+  corr_threshold_long: -0.25             # corr(XAU,DXY) must be < this for longs
+  corr_threshold_short: 0.25             # corr(XAU,DXY) must be > this for shorts
+  dxy_weakening_period: 5                # bars to check DXY direction
+
+# ── Mean-Reversion Strategy (Asian / Low Vol) ──────────────────────────────
+mean_reversion:
+  bollinger_period: 20
+  bollinger_deviation: 2.0
+  rsi_period: 14
+  rsi_oversold: 30
+  rsi_overbought: 70
+  adx_max: 20                            # must be below this (ranging)
+  atr_multiplier_sl: 1.8
+  atr_multiplier_tp1: 1.5                # TP1 (50% close)
+  atr_multiplier_tp2: 2.5                # TP2 (remainder)
+  trail_start_atr: 0.5                   # start trailing after TP1 + 0.5*ATR
+  trail_atr: 0.8
+  partial_close_pct: 50                  # close 50% at TP1
+  max_hold_minutes: 360                  # 6 hours max
+  max_concurrent: 1
+  min_risk_reward: 1.8
+
+# ── Trend-Following Strategy (London / NY) ──────────────────────────────────
+trend_following:
+  ema_fast: 9
+  ema_slow: 21
+  adx_min: 25
+  adx_must_rise: true
+  breakout_period: 20                    # previous N-period high/low
+  tick_volume_period: 10                 # average volume bars
+  tick_volume_multiplier: 1.3            # volume > avg * 1.3
+  atr_multiplier_sl: 2.0
+  atr_multiplier_tp1: 2.0                # TP1 (40% close)
+  atr_multiplier_tp2: 3.5                # TP2 (30% close)
+  partial_close_tp1_pct: 40
+  partial_close_tp2_pct: 30
+  runner_pct: 30
+  trail_activate_r_multiple: 1.5         # start trailing after +1.5R
+  trail_atr: 1.5
+  max_concurrent: 1
+  min_risk_reward: 1.8
+
+# ── Common Trading Rules ─────────────────────────────────────────────────────
+trading:
+  max_daily_trades: 10
+  max_concurrent_total: 2
+  min_risk_reward: 1.8
+  allow_hedging: false
+  # Minimum minutes between trades of same direction
+  cooldown_minutes: 15
+
+# ── Macroeconomic News Filter ───────────────────────────────────────────────
+news:
+  enabled: true
+  pre_pause_minutes: 30                  # block entries N min before event
+  post_pause_minutes: 30                 # block entries N min after event
+  close_before_minutes: 15               # close existing positions N min before (configurable)
+  calendar_source: "trading_economics"   # trading_economics | forex_factory | finnhub
+  calendar_api_key: ${NEWS_API_KEY}
+  daily_sync_utc: "00:30"
+  # Events to filter (Impact Level 3 / Red / High)
+  filter_keywords:
+    - "FOMC"
+    - "NFP"
+    - "Nonfarm"
+    - "CPI"
+    - "Core CPI"
+    - "GDP"
+    - "Retail Sales"
+    - "PPI"
+    - "Fed"
+    - "Interest Rate"
+    - "Unemployment"
+
+# ── Anomaly Detection ───────────────────────────────────────────────────────
+anomaly:
+  # Layer 1 - Statistical
+  statistical:
+    zscore_window: 200                   # rolling window for z-score
+    zscore_threshold: 3.5
+    volatility_spike_mult: 3.0           # vol > median * 3
+    price_gap_atr_mult: 2.5              # gap > 2.5 * ATR
+    spread_percentile: 99                # spread widening beyond 99th pctile
+
+  # Layer 2a - Isolation Forest
+  isolation_forest:
+    enabled: true
+    n_estimators: 100
+    contamination: 0.01                  # expected anomaly rate
+    retrain_interval_bars: 500
+
+  # Layer 2b - Autoencoder
+  autoencoder:
+    enabled: true
+    sequence_length: 50                  # input timesteps
+    hidden_dim: 32
+    latent_dim: 8
+    error_threshold_percentile: 95       # recon error > this → anomaly
+    retrain_interval_hours: 24
+    model_format: "onnx"                 # onnx | torchscript
+
+  # Action
+  cooldown_minutes: 30
+  max_cooldown_minutes: 45
+
+# ── Execution Optimization ──────────────────────────────────────────────────
+execution:
+  smart_executor:
+    enabled: true
+    max_slippage_pips: 2.0
+    fill_timeout_seconds: 10
+    order_split_min_lots: 0.02
+
+  dqn_model:
+    enabled: false                       # start with heuristic, enable after training
+    state_features:
+      - "spread_vs_avg"
+      - "recent_volatility"
+      - "time_of_day"
+      - "regime"
+      - "distance_to_news"
+      - "recent_slippage"
+    retrain_weekly: true
+
+# ── Risk Management ──────────────────────────────────────────────────────────
+risk:
+  # Dynamic Position Sizing
+  position_sizing:
+    mean_reversion_risk_pct: 0.01        # 1% per trade in MR
+    trend_risk_pct: 0.006                # 0.6% per trade in trend
+    reduce_above_daily_dd_pct: 0.03      # halve risk if daily DD > 3%
+    min_lot: 0.01
+    max_lot: 5.0
+
+  # Circuit Breakers
+  circuit_breakers:
+    hard_dd_pct: 0.06                    # 6% daily → close all, halt
+    soft_dd_pct: 0.04                    # 4% daily → reduce size 50%
+    daily_reset_utc: "00:00"
+
+  # Transaction Cost Gate
+  cost_model:
+    min_edge_multiple: 2.5               # expected_edge must be > cost * 2.5
+    default_spread_pips: 0.30            # fallback if can't query
+    estimated_slippage_pips: 0.50        # conservative default
+    commission_per_lot: 7.0              # round-turn commission
+    overnight_swap_long: -3.0            # swap points per lot per day
+    overnight_swap_short: -1.0
+
+# ── Logging & Monitoring ────────────────────────────────────────────────────
+logging:
+  level: "INFO"                          # DEBUG | INFO | WARNING | ERROR
+  format: "json"                         # json | text
+  log_dir: "./logs"
+  audit_enabled: true                    # cryptographic audit trail
+
+monitoring:
+  telegram:
+    enabled: true
+    bot_token: ${TELEGRAM_BOT_TOKEN}
+    chat_id: ${TELEGRAM_CHAT_ID}
+    alert_cooldown_seconds: 300          # 5 min between same-type alerts
+
+  watchdog:
+    heartbeat_file: "/tmp/xau_heartbeat"
+    heartbeat_interval_seconds: 25
+    max_stale_seconds: 90
+
+# ── Database ─────────────────────────────────────────────────────────────────
+database:
+  host: ${DB_HOST:-localhost}
+  port: ${DB_PORT:-5432}
+  database: ${DB_NAME:-xau_trading}
+  user: ${DB_USER}
+  password: ${DB_PASSWORD}
+
+# ── Performance Gates (Forward Test) ───────────────────────────────────────
+performance_gates:
+  min_win_rate: 0.58
+  min_profit_factor: 1.8
+  min_sharpe_ratio: 1.5
+  max_drawdown: 0.08
+  min_recovery_factor: 3.0

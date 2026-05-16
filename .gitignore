@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Environment
+.env
+*.env.local
+
+# Logs
+logs/
+*.log
+
+# Database
+*.db
+*.sqlite
+
+# Models (large files)
+models/trained/*.pth
+models/trained/*.onnx
+models/trained/*.pt
+!models/trained/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+docker-compose.override.yml
+
+# MT5
+*.ex4
+*.ex5
+
+# Data
+data/historical/*.csv
+data/historical/*.parquet
+!data/historical/.gitkeep
+
+# Heartbeat
+/tmp/xau_heartbeat

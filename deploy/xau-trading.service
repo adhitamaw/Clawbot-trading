@@ -1,0 +1,42 @@
+[Unit]
+Description=XAU/USD Institutional Trading System
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=xau_trader
+Group=xau_trader
+WorkingDirectory=/opt/xauusd_trading_system_v1
+Environment="PYTHONUNBUFFERED=1"
+EnvironmentFile=/opt/xauusd_trading_system_v1/config/.env
+ExecStart=/opt/xauusd_trading_system_v1/venv/bin/python -m src.main
+ExecStop=/bin/kill -SIGTERM $MAINPID
+
+# Restart policy
+Restart=on-failure
+RestartSec=5s
+StartLimitInterval=120s
+StartLimitBurst=3
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/xauusd_trading_system_v1/logs /tmp/xau_heartbeat
+ReadOnlyPaths=/opt/xauusd_trading_system_v1
+
+# Resource limits
+LimitNOFILE=65536
+MemoryHigh=8G
+MemoryMax=10G
+CPUQuota=400%
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=xau-trading
+
+[Install]
+WantedBy=multi-user.target

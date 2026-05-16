@@ -31,6 +31,8 @@ from src.data.historical import HistoricalData
 from src.features.technical import FeatureEngine
 from src.ml.anomaly import AnomalyDetector
 from src.ml.model_manager import ModelManager
+from src.regime.detector import RegimeDetector, Regime
+from src.regime.intermarket import IntermarketFilter
 logger = None
 
 
@@ -53,8 +55,8 @@ class TradingSystem:
         self.features: FeatureEngine = None
         self.anomaly_detector: AnomalyDetector = None
         self.model_manager: ModelManager = None
-        self.regime_detector = None
-        self.intermarket_filter = None
+        self.regime_detector: RegimeDetector = None
+        self.intermarket_filter: IntermarketFilter = None
         self.news_filter = None
         self.risk_manager = None
         self.strategy_mr = None
@@ -123,10 +125,21 @@ class TradingSystem:
         
         # 6. Initialize Model Manager
         self.model_manager = ModelManager()
+        
         # Load trained models if they exist
         self.anomaly_detector.load_models()
         
-        # 7. Start heartbeat
+        # 7. Initialize Regime Detector
+        self.regime_detector = RegimeDetector(config=self.config)
+        self.logger.info("regime_detector_initialized")
+        
+        # 8. Initialize Intermarket Filter
+        self.intermarket_filter = IntermarketFilter(
+            bridge=self.bridge, config=self.config
+        )
+        self.logger.info("intermarket_filter_initialized")
+        
+        # 9. Start heartbeat
         await self.bridge.start_heartbeat()
         
         # 3. Record daily start
@@ -375,27 +388,25 @@ class TradingSystem:
             return None
     
     def _get_current_session(self) -> str:
-        """Determine current trading session based on UTC hour."""
+        """Determine current trading session using RegimeDetector."""
+        if self.regime_detector:
+            return self.regime_detector.get_current_session()
         now = datetime.now(timezone.utc)
         hour = now.hour
-        
-        if self.config.sessions.asian.start_utc <= hour < self.config.sessions.asian.end_utc:
-            return "asian"
-        elif self.config.sessions.london.start_utc <= hour < self.config.sessions.london.end_utc:
-            return "london"
-        elif self.config.sessions.ny_overlap.start_utc <= hour < self.config.sessions.ny_overlap.end_utc:
-            return "ny_overlap"
-        else:
-            return "late_ny"
+        if hour < 8: return "asian"
+        if hour < 13: return "london"
+        if hour < 17: return "ny_overlap"
+        return "late_ny"
     
     def _get_regime(self, session: str) -> str:
-        """
-        Determine trading regime (mean_reversion / trend_following / neutral).
-        
-        This is a simplified version — full hybrid regime detection 
-        with ATR+ADX confirmation is in src/regime/detector.py (Phase 3).
-        """
-        # For now, session-based only
+        """Determine trading regime using RegimeDetector with full analysis."""
+        if self.regime_detector:
+            # Fetch bars for regime analysis
+            bars_df = self.bridge.get_bars(self.config.symbols.primary, "M5", count=100)
+            if not bars_df.empty:
+                signal = self.regime_detector.detect(bars_df)
+                return signal.regime
+        # Fallback: session-based only
         if session == "asian":
             return "mean_reversion"
         elif session in ("london", "ny_overlap"):
@@ -405,16 +416,49 @@ class TradingSystem:
     async def _generate_signal(self, session: str, regime: str) -> dict:
         """
         Generate trading signals based on strategy rules.
-        Placeholder — full implementation in Phase 3-4.
+        Now integrated with intermarket filter for directional confirmation.
+        Full strategy modules in Phase 4-5.
         """
-        # Will call:
-        # - regime/detector.py for dynamic confirmation
-        # - features/technical.py for indicator values
-        # - strategy/mean_reversion.py or strategy/trend_following.py
-        # - intermarket filter
-        # - anomaly detector
-        # - cost model gate
-        return None  # No signals in stub
+        # If neutral regime, no signals
+        if regime == "neutral":
+            return None
+        
+        # Run intermarket filter for directional bias
+        if self.intermarket_filter:
+            try:
+                # Get general intermarket analysis
+                analysis = self.intermarket_filter.analyze()
+                
+                if analysis.data_quality != "ok":
+                    self.logger.debug("intermarket_no_data", quality=analysis.data_quality)
+                    return None
+                
+                # Check which direction is confirmed
+                long_ok = self.intermarket_filter.is_long_confirmed()
+                short_ok = self.intermarket_filter.is_short_confirmed()
+                
+                self.logger.debug(
+                    "intermarket_analysis",
+                    corr_xau_dxy=f"{analysis.corr_xau_dxy:.4f}",
+                    dxy_trend=analysis.dxy_trend,
+                    long_ok=long_ok,
+                    short_ok=short_ok,
+                )
+            except Exception as e:
+                self.logger.error("intermarket_check_error", error=str(e))
+                long_ok = short_ok = True  # Allow signals if filter fails
+        else:
+            long_ok = short_ok = True
+        
+        # Signal generation will be done by strategy modules (Phase 4-5)
+        # For now, return feasibility metadata
+        return {
+            "session": session,
+            "regime": regime,
+            "intermarket_long_ok": long_ok,
+            "intermarket_short_ok": short_ok,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
     
     async def _execute_signal(self, signal: dict):
         """
@@ -449,7 +493,9 @@ class TradingSystem:
             "connected": self.bridge.is_connected() if self.bridge else False,
             "running": self._running,
             "session": self._get_current_session(),
-            "regime": self._get_regime(self._get_current_session()),
+            "regime": self.regime_detector.get_status() if self.regime_detector else {},
+            "intermarket": self.intermarket_filter.get_status() if self.intermarket_filter else {},
+            "anomaly": self.anomaly_detector.get_status() if self.anomaly_detector else {},
             "daily_trades": self.daily_trade_count,
             "daily_dd_pct": round(daily_dd, 2),
             "open_positions": len(positions),

@@ -38,6 +38,7 @@ from src.strategy.mean_reversion import MeanReversionStrategy
 from src.strategy.trend_following import TrendFollowingStrategy
 from src.risk.manager import RiskManager, RiskVerdict
 from src.execution.smart_executor import SmartExecutor, ExecutionPlan
+from src.monitoring.telegram_notifier import TelegramNotifier
 logger = None
 
 
@@ -67,6 +68,7 @@ class TradingSystem:
         self.strategy_tf: TrendFollowingStrategy = None
         self.risk_manager: RiskManager = None
         self.executor: SmartExecutor = None
+        self.notifier: TelegramNotifier = None
         self.strategy_mr = None
         self.strategy_tf = None
         self.executor = None
@@ -167,7 +169,24 @@ class TradingSystem:
         self.executor = SmartExecutor(bridge=self.bridge, config=self.config)
         self.logger.info("smart_executor_initialized")
         
-        # 13. Start heartbeat
+        # 13. Initialize Telegram Notifier
+        if self.config.monitoring.telegram.enabled:
+            self.notifier = TelegramNotifier(
+                bot_token=self.config.monitoring.telegram.bot_token,
+                chat_id=self.config.monitoring.telegram.chat_id,
+                alert_cooldown_seconds=self.config.monitoring.telegram.alert_cooldown_seconds,
+            )
+            if self.notifier.enabled:
+                account = self.bridge.get_account_info()
+                if account:
+                    await self.notifier.system_startup(
+                        balance=account.balance,
+                        equity=account.equity,
+                        symbol=self.config.symbols.primary,
+                    )
+                self.logger.info("telegram_notifier_initialized")
+        
+        # 14. Start heartbeat
         await self.bridge.start_heartbeat()
         
         # 3. Record daily start
@@ -216,6 +235,11 @@ class TradingSystem:
         # self.bridge.close_all_positions()
         
         # Disconnect
+        if self.notifier and self.notifier.enabled:
+            try:
+                await self.notifier.system_shutdown()
+            except Exception:
+                pass  # Don't block shutdown
         self.bridge.shutdown()
         
         self.logger.info("system_shutdown_complete")
@@ -274,6 +298,12 @@ class TradingSystem:
                 reason=anomaly_result.trigger_reason,
                 confidence=f"{anomaly_result.confidence:.2f}"
             )
+            if self.notifier and self.notifier.enabled:
+                await self.notifier.anomaly_detected(
+                    reason=anomaly_result.trigger_reason,
+                    confidence=anomaly_result.confidence,
+                    layers=anomaly_result.layer_scores,
+                )
             return
         
         # ── 5. Get Current Session & Regime ──
@@ -613,6 +643,19 @@ class TradingSystem:
                     price=round(report.average_fill_price, 5),
                     slippage_pips=round(report.entry_slippage_pips, 2),
                 )
+                
+                # Telegram notification
+                if self.notifier and self.notifier.enabled:
+                    await self.notifier.trade_opened(
+                        direction=direction,
+                        entry_price=report.average_fill_price,
+                        stop_loss=stop_loss,
+                        take_profit=take_profit,
+                        volume=report.filled_volume,
+                        regime=regime,
+                        risk_pct=verdict.position_size.risk_pct * 100 if verdict.position_size else 0,
+                        rr_ratio=signal_data.get("risk_reward_ratio", 0),
+                    )
             else:
                 self.logger.warning(
                     "trade_execution_failed",

@@ -1,0 +1,15 @@
+services:
+  mt5:
+    image: hudsonventura/mt5:latest
+    container_name: xau_mt5
+    ports:
+      - "5901:5901"
+      - "6901:6901"
+    environment:
+      - VNC_PW=xautrading2025
+      - SCREEN_RESOLUTION=1280x720
+      - TZ=Asia/Jakarta
+    volumes:
+      - ./mt5_data/MQL5/:/home/headless/.wine/drive_c/Program Files/MetaTrader 5/MQL5/
+    restart: unless-stopped
+    mem_limit: 2048m

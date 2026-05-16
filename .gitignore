@@ -45,3 +45,7 @@ data/historical/*.parquet
 
 # Heartbeat
 /tmp/xau_heartbeat
+
+# Virtual Environment
+venv/
+.venv/

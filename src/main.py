@@ -26,8 +26,11 @@ from pathlib import Path
 from src.config import load_config, TradingSystemConfig
 from src.logging.structured_logger import setup_logging, get_logger, AuditLogger
 from src.mt5_bridge import MT5Bridge
-
-# Logger is set up in main() — this is a placeholder
+from src.data.tick_collector import TickCollector
+from src.data.historical import HistoricalData
+from src.features.technical import FeatureEngine
+from src.ml.anomaly import AnomalyDetector
+from src.ml.model_manager import ModelManager
 logger = None
 
 
@@ -45,10 +48,14 @@ class TradingSystem:
         
         # Core components (initialized later)
         self.bridge: MT5Bridge = None
+        self.tick_collector: TickCollector = None
+        self.historical: HistoricalData = None
+        self.features: FeatureEngine = None
+        self.anomaly_detector: AnomalyDetector = None
+        self.model_manager: ModelManager = None
         self.regime_detector = None
         self.intermarket_filter = None
         self.news_filter = None
-        self.anomaly_detector = None
         self.risk_manager = None
         self.strategy_mr = None
         self.strategy_tf = None
@@ -94,7 +101,32 @@ class TradingSystem:
         # Ensure symbols in Market Watch
         self.bridge.ensure_symbols(self.config.symbols.watch_list)
         
-        # 2. Start heartbeat
+        # 2. Initialize Data Pipeline
+        self.tick_collector = TickCollector(
+            bridge=self.bridge,
+            symbol=self.config.symbols.primary,
+        )
+        
+        # Start async tick collection
+        self._tasks.append(await self.tick_collector.start())
+        self.logger.info("tick_collector_started")
+        
+        # 3. Initialize Historical Data
+        self.historical = HistoricalData(bridge=self.bridge)
+        self.historical.load_cache()
+        
+        # 4. Initialize Feature Engine
+        self.features = FeatureEngine()
+        
+        # 5. Initialize Anomaly Detection
+        self.anomaly_detector = AnomalyDetector(config=self.config.anomaly)
+        
+        # 6. Initialize Model Manager
+        self.model_manager = ModelManager()
+        # Load trained models if they exist
+        self.anomaly_detector.load_models()
+        
+        # 7. Start heartbeat
         await self.bridge.start_heartbeat()
         
         # 3. Record daily start
@@ -130,6 +162,10 @@ class TradingSystem:
         for task in self._tasks:
             if not task.done():
                 task.cancel()
+        
+        # Stop tick collector
+        if self.tick_collector:
+            await self.tick_collector.stop()
         
         # Wait for tasks to finish
         if self._tasks:
@@ -186,7 +222,17 @@ class TradingSystem:
             return
         
         # ── 4. Anomaly Check ──
-        if self._is_anomaly_cooldown():
+        if self.anomaly_detector and self.anomaly_detector.is_cooldown_active():
+            return
+        
+        # Run anomaly detection on current data
+        anomaly_result = self._run_anomaly_check()
+        if anomaly_result and anomaly_result.is_anomaly:
+            self.logger.warning(
+                "anomaly_blocking",
+                reason=anomaly_result.trigger_reason,
+                confidence=f"{anomaly_result.confidence:.2f}"
+            )
             return
         
         # ── 5. Get Current Session & Regime ──
@@ -277,14 +323,56 @@ class TradingSystem:
         # Placeholder — full implementation in Phase 4
         return False
     
-    def _is_anomaly_cooldown(self) -> bool:
-        """Check if anomaly cooldown is active."""
-        if self.anomaly_cooldown_until is None:
-            return False
-        if datetime.now(timezone.utc) < self.anomaly_cooldown_until:
-            return True
-        self.anomaly_cooldown_until = None
-        return False
+    def _run_anomaly_check(self):
+        """Run full multi-layer anomaly detection on current data."""
+        if self.anomaly_detector is None or self.bridge is None:
+            return None
+        
+        try:
+            # Get required data points
+            tick = self.bridge.get_tick(self.config.symbols.primary)
+            if tick is None:
+                return None
+            
+            mid_price = (tick.bid + tick.ask) / 2
+            spread = tick.spread
+            
+            # Get latest bars for feature computation
+            bars_df = self.bridge.get_bars(self.config.symbols.primary, "M5", count=100)
+            
+            if not bars_df.empty:
+                # Compute features
+                self.features.set_data(bars_df)
+                
+                atr_series = self.features.atr(20)
+                atr = float(atr_series.iloc[-1]) if not atr_series.empty else spread
+                
+                # Build feature dict for ML layers
+                features = {
+                    'log_return': float(self.features.log_returns().iloc[-1]) if len(bars_df) > 1 else 0.0,
+                    'volatility': float(self.features.rolling_volatility(20).iloc[-1]) if len(bars_df) > 20 else 0.0,
+                    'spread': spread,
+                    'tick_volume': float(bars_df['tick_volume'].iloc[-1]) if 'tick_volume' in bars_df.columns else 0.0,
+                    'rsi': float(self.features.rsi(14).iloc[-1]) if len(bars_df) > 14 else 50.0,
+                    'adx': float(self.features.adx(14)[0].iloc[-1]) if len(bars_df) > 14 else 25.0,
+                    'zscore': float(self.features.zscore(200).iloc[-1]) if len(bars_df) > 200 else 0.0,
+                    'volume_ratio': float(self.features.volume_ratio(10).iloc[-1]) if 'tick_volume' in bars_df.columns else 1.0,
+                }
+            else:
+                atr = spread * 3
+                features = {}
+            
+            # Run anomaly check
+            return self.anomaly_detector.check(
+                price=mid_price,
+                spread=spread,
+                atr=atr,
+                features=features,
+            )
+            
+        except Exception as e:
+            self.logger.error("anomaly_check_error", error=str(e))
+            return None
     
     def _get_current_session(self) -> str:
         """Determine current trading session based on UTC hour."""

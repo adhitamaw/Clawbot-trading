@@ -33,6 +33,9 @@ from src.ml.anomaly import AnomalyDetector
 from src.ml.model_manager import ModelManager
 from src.regime.detector import RegimeDetector, Regime
 from src.regime.intermarket import IntermarketFilter
+from src.news.filter import NewsFilter
+from src.strategy.mean_reversion import MeanReversionStrategy
+from src.strategy.trend_following import TrendFollowingStrategy
 logger = None
 
 
@@ -57,7 +60,9 @@ class TradingSystem:
         self.model_manager: ModelManager = None
         self.regime_detector: RegimeDetector = None
         self.intermarket_filter: IntermarketFilter = None
-        self.news_filter = None
+        self.news_filter: NewsFilter = None
+        self.strategy_mr: MeanReversionStrategy = None
+        self.strategy_tf: TrendFollowingStrategy = None
         self.risk_manager = None
         self.strategy_mr = None
         self.strategy_tf = None
@@ -139,7 +144,19 @@ class TradingSystem:
         )
         self.logger.info("intermarket_filter_initialized")
         
-        # 9. Start heartbeat
+        # 9. Initialize News Filter
+        self.news_filter = NewsFilter(config=self.config)
+        self.logger.info("news_filter_initialized")
+        
+        # Schedule calendar sync (run now and daily)
+        asyncio.create_task(self.news_filter.sync_calendar())
+        
+        # 10. Initialize Strategy Modules
+        self.strategy_mr = MeanReversionStrategy(config=self.config)
+        self.strategy_tf = TrendFollowingStrategy(config=self.config)
+        self.logger.info("strategies_initialized")
+        
+        # 11. Start heartbeat
         await self.bridge.start_heartbeat()
         
         # 3. Record daily start
@@ -332,8 +349,12 @@ class TradingSystem:
         return True
     
     def _is_news_pause(self) -> bool:
-        """Check if we're in a news pause window."""
-        # Placeholder — full implementation in Phase 4
+        """Check if we're in a news pause window using NewsFilter."""
+        if self.news_filter and self.news_filter.enabled:
+            status = self.news_filter.is_paused()
+            if status.is_paused:
+                self.logger.debug("news_pause_active", reason=status.reason)
+                return True
         return False
     
     def _run_anomaly_check(self):
@@ -415,50 +436,70 @@ class TradingSystem:
     
     async def _generate_signal(self, session: str, regime: str) -> dict:
         """
-        Generate trading signals based on strategy rules.
-        Now integrated with intermarket filter for directional confirmation.
-        Full strategy modules in Phase 4-5.
+        Generate trading signals using strategy modules.
+        Routes to mean-reversion or trend-following based on regime.
         """
-        # If neutral regime, no signals
+        # No signals in neutral
         if regime == "neutral":
             return None
         
-        # Run intermarket filter for directional bias
-        if self.intermarket_filter:
-            try:
-                # Get general intermarket analysis
-                analysis = self.intermarket_filter.analyze()
+        try:
+            # Fetch latest bars
+            bars_df = self.bridge.get_bars(self.config.symbols.primary, "M5", count=120)
+            if bars_df.empty:
+                return None
+            
+            if regime == "mean_reversion" and self.strategy_mr:
+                # Check max concurrent for MR
+                mr_positions = self.bridge.get_open_positions(magic=20260516)
+                mr_count = sum(1 for p in mr_positions if "MR" in (p.comment or ""))
                 
-                if analysis.data_quality != "ok":
-                    self.logger.debug("intermarket_no_data", quality=analysis.data_quality)
+                if mr_count >= self.config.mean_reversion.max_concurrent:
                     return None
                 
-                # Check which direction is confirmed
-                long_ok = self.intermarket_filter.is_long_confirmed()
-                short_ok = self.intermarket_filter.is_short_confirmed()
-                
-                self.logger.debug(
-                    "intermarket_analysis",
-                    corr_xau_dxy=f"{analysis.corr_xau_dxy:.4f}",
-                    dxy_trend=analysis.dxy_trend,
-                    long_ok=long_ok,
-                    short_ok=short_ok,
+                signal = self.strategy_mr.generate_signal(
+                    df=bars_df,
+                    intermarket_filter=self.intermarket_filter,
+                    news_filter=self.news_filter,
+                    anomaly_detector=self.anomaly_detector,
                 )
-            except Exception as e:
-                self.logger.error("intermarket_check_error", error=str(e))
-                long_ok = short_ok = True  # Allow signals if filter fails
-        else:
-            long_ok = short_ok = True
+                
+                if signal.all_conditions_met:
+                    return {
+                        "strategy": "mean_reversion",
+                        "signal": signal.to_dict(),
+                    }
+            
+            elif regime == "trend_following" and self.strategy_tf:
+                # Check max concurrent for TF
+                tf_positions = self.bridge.get_open_positions(magic=20260516)
+                tf_count = sum(1 for p in tf_positions if "TF" in (p.comment or ""))
+                
+                if tf_count >= self.config.trend_following.max_concurrent:
+                    return None
+                
+                # Get regime info for direction
+                regime_signal = self.regime_detector.detect(bars_df) if self.regime_detector else None
+                regime_info = regime_signal.to_dict() if regime_signal else None
+                
+                signal = self.strategy_tf.generate_signal(
+                    df=bars_df,
+                    regime_info=regime_info,
+                    intermarket_filter=self.intermarket_filter,
+                    news_filter=self.news_filter,
+                    anomaly_detector=self.anomaly_detector,
+                )
+                
+                if signal.all_conditions_met:
+                    return {
+                        "strategy": "trend_following",
+                        "signal": signal.to_dict(),
+                    }
+            
+        except Exception as e:
+            self.logger.error("signal_generation_error", error=str(e))
         
-        # Signal generation will be done by strategy modules (Phase 4-5)
-        # For now, return feasibility metadata
-        return {
-            "session": session,
-            "regime": regime,
-            "intermarket_long_ok": long_ok,
-            "intermarket_short_ok": short_ok,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
+        return None
     
     async def _execute_signal(self, signal: dict):
         """
@@ -495,6 +536,7 @@ class TradingSystem:
             "session": self._get_current_session(),
             "regime": self.regime_detector.get_status() if self.regime_detector else {},
             "intermarket": self.intermarket_filter.get_status() if self.intermarket_filter else {},
+            "news": self.news_filter.get_status() if self.news_filter else {},
             "anomaly": self.anomaly_detector.get_status() if self.anomaly_detector else {},
             "daily_trades": self.daily_trade_count,
             "daily_dd_pct": round(daily_dd, 2),

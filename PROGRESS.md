@@ -39,22 +39,31 @@ Python `MetaTrader5` package doesn't work under Wine (DLL `crealf` missing). Sol
 
 ## Phase 2: BTC Scalping EA
 
-### Status: 🔧 Code Complete, ⏸️ Backtest Done, Pending Compilation & Live Test
+### Status: 🔧 Code Complete — v3.0 Redesign PRD Done — Pending Implementation
 
-### BTC_Scalper.mq5 (Basic)
-- **Strategy:** RSI(14) + EMA(20/50) crossover + Volume confirmation
-- **Timeframe:** M5
-- **Lines:** 484
+### BTC_Scalper_Pro.mq5 v2.0 (Existing)
+- 528 lines, multi-TF (M5/M15/M30)
+- ADX>22 + BB squeeze + EMA cascade + RSI(5) + PA
+- **Audit found:** BB buffer bug, softBreak never activates, indicator leak, EMA cascade unused
+- **Backtest:** 5 trades/month (too strict) — Adhit wants 10+/day
 
-### BTC_Scalper_Pro.mq5 (Professional)
-- **Strategy:** Multi-timeframe (M5/M15/M30) + ADX filter (>22) + BB squeeze + EMA cascade (8/21/34) + RSI(5) + Volume + Price Action patterns
-- **Features:** Partial TP (50%/50%), pyramiding (max 3), dynamic SL (ATR-based), circuit breaker (max 3 losses), news filter
-- **Lines:** 528
+### BTC_Scalper_Pro v3.0 (Redesigned PRD)
+- 📄 `docs/BTC_SCALPER_PRD.md` — Updated dengan:
+  - **5-layer gate filter:** H4→H1→M30→M15→M5
+  - **3 strategy modes:** Conservative / Balanced / Aggressive
+  - **6 entry patterns:** Pinbar / Engulfing / BB Bounce / Squeeze Breakout / Retest / Cascade
+  - **3-level TP:** 40%/35%/25% split with runner
+  - **Compounding engine:** Auto-scale every +10%
+  - **21 improvements documented** in `docs/BTC_SCALPER_IMPROVEMENT.md`
+  - **Weekend mode, anti-chop, HTF S/R, volatility scaling**
 
-### Backtest Results (Apr 16 - May 16, 2026)
-| Metric | Value |
-|--------|-------|
-| Total Trades | 5 |
+### Target Metrik (Balanced mode)
+| Metric | Target |
+|--------|--------|
+| Win Rate | 55-65% |
+| Trades/Day | 3-7 |
+| Monthly ROI | 15-30% |
+| 200% Return | ~7 bulan (realistis) / ~4 bulan (aggressive) |
 | Win Rate | 60% (3 wins, 2 losses) |
 | Profit Factor | 3.28 |
 | Max DD | 0.0% |
@@ -97,7 +106,8 @@ xauusd_trading_system_v1/
 │   └── BTC_Scalper_Pro.mq5        # Pro BTC scalper (528 lines)
 ├── docs/
 │   ├── BTC_TRADING_PRD.md         # BTC trading PRD
-│   └── BTC_SCALPER_PRD.md         # BTC scalper PRD
+│   ├── BTC_SCALPER_PRD.md         # BTC scalper PRD (v3.0 updated)
+│   └── BTC_SCALPER_IMPROVEMENT.md # 21 improvement items
 └── trade/
     ├── docker-compose-mt5.yml     # MT5 container config
     ├── custom_start.sh            # Container startup script
@@ -117,9 +127,11 @@ xauusd_trading_system_v1/
 
 ## What's Next
 
-1. [ ] Compile BTC_Scalper_Pro.mq5 via MetaEditor (VNC)
-2. [ ] Run BTC backtest in MT5 native tester
-3. [ ] Live test XAU/USD EA when market opens (Monday)
-4. [ ] Live test BTC scalper on BTCUSD (24/7)
-5. [ ] Build Python signal generator to feed XAU_Executor EA
-6. [ ] Optimize BTC strategy for higher trade frequency
+1. [ ] Implement BTC_Scalper_Pro v3.0 MQL5 (~650 lines) based on updated PRD
+2. [ ] Compile via MetaEditor (VNC → F7)
+3. [ ] Backtest native MT5 — mode Balanced + Aggressive, 6 bulan
+4. [ ] Attach ke BTCUSD M5 chart, live test (24/7)
+5. [ ] Live test XAU/USD EA when market opens (Monday)
+6. [ ] Review entry reason logs from live BTC trading
+7. [ ] Optimize per mode berdasarkan hasil backtest & live
+8. [ ] Build Python signal generator to feed XAU_Executor EA

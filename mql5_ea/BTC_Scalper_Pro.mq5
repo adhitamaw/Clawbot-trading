@@ -177,10 +177,9 @@ void OnTick()
    // Manage open positions (update simulated balance for backtest)
    ManagePositions();
    
-   // Update simulated balance from closed positions (backtest mode)
+   // Clean closed tickets from tracking array (backtest mode)
    if(_isBacktest)
    {
-      UpdateSimBalance();
       CleanClosedTickets();
    }
    
@@ -192,56 +191,16 @@ void OnTick()
 }
 
 //+------------------------------------------------------------------+
-//| Update simulated balance in backtest mode                         |
-//+------------------------------------------------------------------+
-void UpdateSimBalance()
-{
-   if(!_isBacktest) return;
-   
-   // Check if any of our tracked tickets have been closed
-   // MT5 updates profit history during backtest automatically
-   // We track closed positions via history
-   
-   int total = HistoryTotal();
-   for(int i = total - 1; i >= 0; i--)
-   {
-      ulong ticket = HistoryOrderGetTicket(i);
-      if(ticket > 0)
-      {
-         // Check if this is one of our orders
-         bool tracked = false;
-         for(int j = 0; j < ArraySize(_openTickets); j++)
-         {
-            if(_openTickets[j] == (int)ticket)
-            {
-               tracked = true;
-               break;
-            }
-         }
-         
-         if(!tracked) continue;
-         
-         // Check if it's a closing order
-         ENUM_ORDER_TYPE type = (ENUM_ORDER_TYPE)HistoryOrderGetInteger(ticket, ORDER_TYPE);
-         if(type == ORDER_TYPE_BUY || type == ORDER_TYPE_SELL)
-         {
-            // This is an open order, not a close
-            continue;
-         }
-      }
-   }
-}
-
-//+------------------------------------------------------------------+
 //| Clean closed tickets from tracking array                          |
 //+------------------------------------------------------------------+
 void CleanClosedTickets()
 {
-   // Check each ticket - if position no longer exists, remove it
-   int newSize = 0;
    int total = ArraySize(_openTickets);
+   if(total == 0) return;
+   
    int newArr[];
    ArrayResize(newArr, total);
+   int newSize = 0;
    
    for(int i = 0; i < total; i++)
    {
@@ -595,7 +554,7 @@ int OpenOrder(string type, double lot, double price, double sl, double tp)
    if(OrderSend(req, res))
    {
       Print("Order opened: ", res.order, " ", type, " ", lot, " lots");
-      return res.order;
+      return (int)res.order;
    }
    else
    {

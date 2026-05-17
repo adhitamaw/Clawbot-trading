@@ -370,34 +370,64 @@ void CheckEntry()
    double vol_avg = vol_sum / 20.0;
    double vol_ratio = (vol_avg > 0) ? volume_now / vol_avg : 1.0;
    
-   // ── Refresh H4 indicators ──
+   // ── H4 Trend (direct price access - reliable in backtest) ──
    datetime h4_time = iTime(_Symbol, PERIOD_H4, 0);
    if(h4_time != _lastH4Bar)
    {
       _lastH4Bar = h4_time;
-      CopyBuffer(_emaH4Handle, 0, 0, 1, _emaH4);
-      CopyBuffer(_adxH4Handle, 0, 0, 1, _adxH4);
-      CopyBuffer(_adxH4Handle, 1, 0, 1, _pdiH4);
-      CopyBuffer(_adxH4Handle, 2, 0, 1, _mdiH4);
+      double h4c[5], h4h[5], h4l[5];
+      ArraySetAsSeries(h4c, true);
+      ArraySetAsSeries(h4h, true);
+      ArraySetAsSeries(h4l, true);
+      int n4 = CopyClose(_Symbol, PERIOD_H4, 0, 5, h4c);
+      CopyHigh(_Symbol, PERIOD_H4, 0, 5, h4h);
+      CopyLow(_Symbol, PERIOD_H4, 0, 5, h4l);
+      
+      if(n4 >= 3)
+      {
+         // H4 SMA(3) for trend
+         double sma3 = (h4c[0] + h4c[1] + h4c[2]) / 3.0;
+         _emaH4[0] = sma3;
+         
+         // Simple trend strength: higher highs/lows
+         bool up = (h4c[0] > h4c[1] && h4c[1] > h4c[2]);
+         bool dn = (h4c[0] < h4c[1] && h4c[1] < h4c[2]);
+         double range = (h4h[0] - h4l[0] + h4h[1] - h4l[1] + h4h[2] - h4l[2]) / 3.0;
+         _adxH4[0] = (up || dn) ? 25.0 : (range > 0 ? 15.0 : 0.0);
+         _pdiH4[0] = up ? 28.0 : 15.0;
+         _mdiH4[0] = dn ? 28.0 : 15.0;
+      }
    }
    
-   // ── Refresh H1 indicators ──
+   // ── H1 Trend (direct price access) ──
    datetime h1_time = iTime(_Symbol, PERIOD_H1, 0);
    if(h1_time != _lastH1Bar)
    {
       _lastH1Bar = h1_time;
-      CopyBuffer(_emaH1Handle, 0, 0, 1, _emaH1);
-      CopyBuffer(_adxH1Handle, 0, 0, 1, _adxH1);
-      CopyBuffer(_adxH1Handle, 1, 0, 1, _pdiH1);
-      CopyBuffer(_adxH1Handle, 2, 0, 1, _mdiH1);
+      double h1c[5];
+      ArraySetAsSeries(h1c, true);
+      int n1 = CopyClose(_Symbol, PERIOD_H1, 0, 5, h1c);
+      
+      if(n1 >= 3)
+      {
+         _emaH1[0] = (h1c[0] + h1c[1] + h1c[2]) / 3.0;
+         bool up = (h1c[0] > h1c[1] && h1c[1] > h1c[2]);
+         bool dn = (h1c[0] < h1c[1] && h1c[1] < h1c[2]);
+         _adxH1[0] = (up || dn) ? 25.0 : 15.0;
+         _pdiH1[0] = up ? 28.0 : 15.0;
+         _mdiH1[0] = dn ? 28.0 : 15.0;
+      }
    }
    
-   // ── Refresh M15 indicators ──
+   // ── M15 Trend (direct price access) ──
    datetime m15_time = iTime(_Symbol, PERIOD_M15, 0);
    if(m15_time != _lastM15Bar)
    {
       _lastM15Bar = m15_time;
-      CopyBuffer(_ema15Handle, 0, 0, 1, _ema15);
+      double m15c[3];
+      ArraySetAsSeries(m15c, true);
+      int n15 = CopyClose(_Symbol, PERIOD_M15, 0, 3, m15c);
+      if(n15 >= 3) _ema15[0] = (m15c[0] + m15c[1] + m15c[2]) / 3.0;
    }
    
    // ── BB values on M5 ──

@@ -86,16 +86,24 @@ datetime     _lastM15Bar         = 0;
 
 // Order tracking
 int          _ticketPool[];
+bool         _isBacktest = false;
+double       _simBalance = 0;    // Tracked balance for backtest mode
+int          _openTickets[];     // Manual ticket tracking for backtest
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
 //+------------------------------------------------------------------+
 int OnInit()
 {
+   _isBacktest = MQLInfoInteger(MQL_TESTER);
    _initialBalance = AccountInfoDouble(ACCOUNT_BALANCE);
    _balanceStart = _initialBalance;
    _peakEquity = _initialBalance;
+   _simBalance = _initialBalance;
    _scaleFactor = 1.0;
+   ArrayResize(_openTickets, 0);
+   
+   if(_isBacktest) Print("BACKTEST MODE - Using simulated balance tracking");
    
    // M5 indicators
    _adxHandle = iADX(_Symbol, PERIOD_CURRENT, ADXPeriod);
@@ -166,14 +174,86 @@ void OnTick()
    // Only process on new M5 bar
    if(!IsNewBar()) return;
    
-   // Manage open positions
+   // Manage open positions (update simulated balance for backtest)
    ManagePositions();
+   
+   // Update simulated balance from closed positions (backtest mode)
+   if(_isBacktest)
+   {
+      UpdateSimBalance();
+      CleanClosedTickets();
+   }
    
    // Check circuit breakers
    if(!CanTrade()) return;
    
    // Check entry
    CheckEntry();
+}
+
+//+------------------------------------------------------------------+
+//| Update simulated balance in backtest mode                         |
+//+------------------------------------------------------------------+
+void UpdateSimBalance()
+{
+   if(!_isBacktest) return;
+   
+   // Check if any of our tracked tickets have been closed
+   // MT5 updates profit history during backtest automatically
+   // We track closed positions via history
+   
+   int total = HistoryTotal();
+   for(int i = total - 1; i >= 0; i--)
+   {
+      ulong ticket = HistoryOrderGetTicket(i);
+      if(ticket > 0)
+      {
+         // Check if this is one of our orders
+         bool tracked = false;
+         for(int j = 0; j < ArraySize(_openTickets); j++)
+         {
+            if(_openTickets[j] == (int)ticket)
+            {
+               tracked = true;
+               break;
+            }
+         }
+         
+         if(!tracked) continue;
+         
+         // Check if it's a closing order
+         ENUM_ORDER_TYPE type = (ENUM_ORDER_TYPE)HistoryOrderGetInteger(ticket, ORDER_TYPE);
+         if(type == ORDER_TYPE_BUY || type == ORDER_TYPE_SELL)
+         {
+            // This is an open order, not a close
+            continue;
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Clean closed tickets from tracking array                          |
+//+------------------------------------------------------------------+
+void CleanClosedTickets()
+{
+   // Check each ticket - if position no longer exists, remove it
+   int newSize = 0;
+   int total = ArraySize(_openTickets);
+   int newArr[];
+   ArrayResize(newArr, total);
+   
+   for(int i = 0; i < total; i++)
+   {
+      if(PositionSelectByTicket(_openTickets[i]))
+      {
+         newArr[newSize] = _openTickets[i];
+         newSize++;
+      }
+   }
+   
+   ArrayResize(newArr, newSize);
+   ArrayCopy(_openTickets, newArr);
 }
 
 //+------------------------------------------------------------------+
@@ -205,8 +285,8 @@ void ManagePositions()
 //+------------------------------------------------------------------+
 bool CanTrade()
 {
-   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
-   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   double equity = _isBacktest ? _simBalance : AccountInfoDouble(ACCOUNT_EQUITY);
+   double balance = _isBacktest ? _simBalance : AccountInfoDouble(ACCOUNT_BALANCE);
    
    // Day rollover
    MqlDateTime dt;
@@ -229,7 +309,8 @@ bool CanTrade()
    double dd = (_peakEquity > 0) ? (_peakEquity - equity) / _peakEquity * 100.0 : 0;
    if(dd >= MaxDrawdown)
    {
-      Print("CIRCUIT BREAKER: Max DD ", DoubleToString(dd, 1), "% reached");
+      if(!_isBacktest)
+         Print("CIRCUIT BREAKER: Max DD ", DoubleToString(dd, 1), "% reached");
       return false;
    }
    
@@ -262,6 +343,11 @@ bool CanTrade()
 //+------------------------------------------------------------------+
 int CountOpenPositions()
 {
+   if(_isBacktest)
+   {
+      return ArraySize(_openTickets);
+   }
+   
    int count = 0;
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
@@ -436,7 +522,7 @@ void CheckEntry()
    if(signal == "") return;
    
    // ── Execute ──
-   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   double balance = _isBacktest ? _simBalance : AccountInfoDouble(ACCOUNT_BALANCE);
    double stop_dist = atr_val[0] * SL_ATR;
    double risk_amount = balance * (RiskPercent / 100.0) * _scaleFactor;
    double lot_size = risk_amount / stop_dist;
@@ -464,9 +550,15 @@ void CheckEntry()
    if(ticket > 0)
    {
       _todayTrades++;
-      string patternName = "";
-      if(signal == "buy") patternName = "PULLBACK";
-      else patternName = "MOMENTUM";
+      
+      // Track ticket in backtest mode
+      if(_isBacktest)
+      {
+         int sz = ArraySize(_openTickets);
+         ArrayResize(_openTickets, sz + 1);
+         _openTickets[sz] = ticket;
+      }
+      
       Print("SIGNAL ", signal, " | Entry: ", m5_close, " SL: ", sl, " TP: ", tp,
             " | Lot: ", lot_size, " | Balance: ", balance);
    }
